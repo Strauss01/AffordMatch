@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AffordMatch — Buyer</title>
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  .envelope{padding:24px;margin-bottom:28px;}
+  .envelope .range{font-family:var(--font-serif);font-size:30px;margin-bottom:6px;}
+  .envelope .range .to{color:var(--ink-faint);font-size:20px;margin:0 6px;}
+  .envelope .sub{font-size:13px;color:var(--ink-soft);margin-bottom:14px;}
+  .listing-card{display:flex;flex-direction:column;gap:8px;}
+  .listing-card .name{font-weight:600;font-size:14.5px;}
+  .listing-card .loc{font-size:12px;color:var(--ink-faint);}
+  .listing-card .price{font-family:var(--font-serif);font-size:19px;}
+  .listing-card .payment{font-size:12.5px;color:var(--ink-soft);}
+  .listing-card .foot{display:flex;justify-content:space-between;align-items:center;margin-top:6px;}
+  .req-row{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);}
+  .req-row:last-child{border-bottom:none;}
+  .offer-line{font-size:13px;color:var(--ink-soft);margin-top:4px;}
+  .offer-actions{display:flex;gap:8px;margin-top:8px;}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="wordmark">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none"><path d="M3 17 L9 9 L14 13 L23 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3 H23 V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="name">Afford<b>Match</b></div>
+      <div class="tag">Buyer</div>
+    </div>
+    <div class="top-actions" id="topActions"></div>
+  </div>
+</header>
+
+<main><div class="shell" id="app"></div></main>
+<footer class="foot">AffordMatch — affordability → matching → provider → deal.</footer>
+
+<script src="../shared/config.js"></script>
+<script src="../shared/api.js"></script>
+<script>
+const AM = window.AM;
+const app = document.getElementById("app");
+const topActions = document.getElementById("topActions");
+
+let state = { mode: "auto", envelope: null, matches: [], leads: [], error: null };
+
+function renderTopActions() {
+  const loggedIn = !!AM.getToken();
+  topActions.innerHTML = loggedIn
+    ? `<span class="who" id="whoLabel"></span><button class="btn ghost small" id="logoutBtn">Log out</button>`
+    : "";
+  if (loggedIn) {
+    document.getElementById("logoutBtn").onclick = () => { AM.clearSession(); boot(); };
+    AM.api("GET", "/api/auth/me").then(d => { document.getElementById("whoLabel").textContent = d.user.email; }).catch(()=>{});
+  }
+}
+
+async function boot() {
+  renderTopActions();
+  if (!AM.getToken()) { renderAuth(); return; }
+  if (AM.getRole() !== "buyer") { AM.clearSession(); renderAuth(); return; }
+  await loadAll();
+}
+
+// ---------------- auth ----------------
+function renderAuth() {
+  app.innerHTML = `
+    <div class="auth-shell card">
+      <div class="tabs">
+        <button id="tabLogin" class="active">Log in</button>
+        <button id="tabRegister">Create account</button>
+      </div>
+      <div id="authError"></div>
+      <div id="authForm"></div>
+    </div>`;
+  document.getElementById("tabLogin").onclick = () => showLoginForm();
+  document.getElementById("tabRegister").onclick = () => showRegisterForm();
+  showLoginForm();
+}
+
+function showLoginForm() {
+  setTab("tabLogin");
+  document.getElementById("authForm").innerHTML = `
+    <div class="field"><label>Email</label><input id="lEmail" type="email" value="buyer@affordmatch.dev"></div>
+    <div class="field"><label>Password</label><input id="lPass" type="password" value="Password123!"></div>
+    <button class="btn primary" id="lSubmit" style="width:100%">Log in</button>
+    <p style="font-size:12px;color:var(--ink-faint);margin-top:12px;">Seeded demo buyer is pre-filled — just click Log in.</p>`;
+  document.getElementById("lSubmit").onclick = async () => {
+    try {
+      const d = await AM.api("POST", "/api/auth/login", { email: val("lEmail"), password: val("lPass") });
+      if (d.user.role !== "buyer") throw new Error("That account is not a buyer account.");
+      AM.setSession(d.token, d.user.role);
+      boot();
+    } catch (e) { showAuthError(e.message); }
+  };
+}
+
+function showRegisterForm() {
+  setTab("tabRegister");
+  document.getElementById("authForm").innerHTML = `
+    <div class="field"><label>Full name</label><input id="rName" type="text" placeholder="Thabo Nkosi"></div>
+    <div class="field"><label>Email</label><input id="rEmail" type="email" placeholder="you@email.com"></div>
+    <div class="field"><label>Password</label><input id="rPass" type="password" placeholder="At least 8 characters"></div>
+    <button class="btn primary" id="rSubmit" style="width:100%">Create account</button>`;
+  document.getElementById("rSubmit").onclick = async () => {
+    try {
+      const d = await AM.api("POST", "/api/auth/register/buyer", { fullName: val("rName"), email: val("rEmail"), password: val("rPass") });
+      AM.setSession(d.token, d.user.role);
+      boot();
+    } catch (e) { showAuthError(e.message); }
+  };
+}
+
+function setTab(id) {
+  document.getElementById("tabLogin").classList.toggle("active", id === "tabLogin");
+  document.getElementById("tabRegister").classList.toggle("active", id === "tabRegister");
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+function showAuthError(msg) {
+  document.getElementById("authError").innerHTML = `<div class="error-box">${AM.escapeHtml(msg)}</div>`;
+}
+
+// ---------------- dashboard ----------------
+async function loadAll() {
+  app.innerHTML = `<div class="empty">Loading your affordability profile…</div>`;
+  try {
+    const [envRes, leadsRes] = await Promise.all([
+      AM.api("GET", `/api/buyer/affordability?mode=${state.mode}`),
+      AM.api("GET", "/api/buyer/leads")
+    ]);
+    state.envelope = envRes.envelope;
+    state.leads = leadsRes.leads;
+    if (state.envelope) {
+      const m = await AM.api("GET", `/api/buyer/matches?mode=${state.mode}`);
+      state.matches = m.matches;
+    } else {
+      state.matches = [];
+    }
+    renderDashboard();
+  } catch (e) {
+    app.innerHTML = `<div class="error-box">${AM.escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderDashboard() {
+  const e = state.envelope;
+  let html = "";
+
+  html += `<div class="section-head">
+    <div class="tabs" style="margin-bottom:0;width:280px;">
+      <button id="modeAuto" class="${state.mode==="auto"?"active":""}">Automotive</button>
+      <button id="modePty" class="${state.mode==="property"?"active":""}">Property</button>
+    </div>
+    <div class="count">Affordability first, then matches.</div>
+  </div>`;
+
+  html += `<div class="row">
+    <div class="card" style="flex:1.1;">
+      <h1>Tell us your numbers</h1>
+      <div class="field"><label>Gross monthly income (R)</label><input id="fIncome" type="text" value="${e ? e.grossIncome : 42000}"></div>
+      <div class="field"><label>Existing monthly debt repayments (R)</label><input id="fDebts" type="text" value="${e ? e.monthlyDebts : 4500}"></div>
+      <div class="field"><label>Deposit available (R)</label><input id="fDeposit" type="text" value="${e ? e.deposit : 40000}"></div>
+      <div class="row">
+        <div class="field"><label>Interest rate (annual %)</label><input id="fRate" type="text" value="${e ? e.interestRate : (state.mode==="auto"?11.75:11.25)}"></div>
+        <div class="field"><label>Term (months)</label><input id="fTerm" type="text" value="${e ? e.termMonths : (state.mode==="auto"?72:240)}"></div>
+      </div>
+      <button class="btn primary" id="saveAfford" style="width:100%">Update affordability</button>
+      <div id="affordMsg"></div>
+    </div>
+    <div class="card envelope" style="flex:1;">${renderEnvelope()}</div>
+  </div>`;
+
+  html += `<div class="section-head" style="margin-top:32px;"><h2>Matched ${state.mode === "auto" ? "vehicles" : "properties"}</h2><div class="count">${state.matches.length} shown, sorted by match score</div></div>`;
+  if (!e) {
+    html += `<div class="empty">Submit your numbers above to see matches.</div>`;
+  } else if (state.matches.length === 0) {
+    html += `<div class="empty">No matching listings within your current budget envelope yet.</div>`;
+  } else {
+    html += `<div class="grid">` + state.matches.map(renderListingCard).join("") + `</div>`;
+  }
+
+  if (state.leads.length) {
+    html += `<div class="section-head" style="margin-top:32px;"><h2>My requests</h2><div class="count">${state.leads.length}</div></div>`;
+    html += `<div class="card" style="padding:0;">` + state.leads.map(renderLeadRow).join("") + `</div>`;
+  }
+
+  app.innerHTML = html;
+
+  document.getElementById("modeAuto").onclick = () => { state.mode = "auto"; loadAll(); };
+  document.getElementById("modePty").onclick = () => { state.mode = "property"; loadAll(); };
+  document.getElementById("saveAfford").onclick = submitAffordability;
+
+  state.matches.forEach(m => {
+    const btn = document.getElementById("req-" + m.id);
+    if (btn) btn.onclick = () => requestOffer(m.id, btn);
+  });
+  state.leads.forEach(l => {
+    if (!l.offer || l.offer.buyerResponse !== "pending") return;
+    const a = document.getElementById("accept-" + l.id);
+    const d = document.getElementById("decline-" + l.id);
+    if (a) a.onclick = () => respondOffer(l.offer.id, "accepted");
+    if (d) d.onclick = () => respondOffer(l.offer.id, "declined");
+  });
+}
+
+function renderEnvelope() {
+  const e = state.envelope;
+  if (!e) {
+    return `<div style="font-size:13px;color:var(--ink-faint);">Your budget envelope will appear here once you submit your numbers.</div>`;
+  }
+  if (e.overCommitted || e.maxMonthlyPayment <= 0) {
+    return `<div style="font-size:12px;color:var(--ink-faint);margin-bottom:6px;">Your estimated budget envelope</div>
+      <div class="range" style="color:var(--caution);font-size:20px;">No affordable range yet</div>
+      <div class="sub">Existing debts leave no room for a new repayment at this income level.</div>
+      <div class="error-box" style="margin-bottom:0;">Reduce existing debt, increase income, or add a larger deposit.</div>`;
+  }
+  return `<div style="font-size:12px;color:var(--ink-faint);margin-bottom:6px;">Your estimated budget envelope</div>
+    <div class="range num">${AM.money(e.minPrice)}<span class="to">–</span>${AM.money(e.maxPrice)}</div>
+    <div class="sub">Max repayment <b class="num">${AM.money(e.maxMonthlyPayment)}</b>/mo at ${e.interestRate}% over ${e.termMonths} months.</div>
+    <div class="notice-box" style="margin-bottom:0;">This keeps total debt commitments within a responsible share of income.</div>`;
+}
+
+function renderListingCard(m) {
+  const tier = m.score >= 70 ? "high" : (m.score >= 40 ? "mid" : "low");
+  const already = state.leads.some(l => l.listingId === m.id);
+  return `<div class="card listing-card">
+    <div class="name">${AM.escapeHtml(m.title)}</div>
+    <div class="loc">${AM.escapeHtml(m.location || "")}</div>
+    <div class="price num">${AM.money(m.price)}</div>
+    <div class="payment">Est. repayment <b class="num">${AM.money(m.estimatedPayment)}</b>/mo</div>
+    <div class="foot">
+      <span class="pill ${tier}">${m.score} match</span>
+      <button class="btn primary small" id="req-${m.id}" ${already ? "disabled" : ""}>${already ? "Requested" : "Request offer"}</button>
+    </div>
+    <div style="font-size:11.5px;color:var(--ink-faint);border-top:1px dashed var(--line);padding-top:8px;">Offered by ${AM.escapeHtml(m.providerName)}</div>
+  </div>`;
+}
+
+function renderLeadRow(l) {
+  let offerHtml = "";
+  if (l.offer) {
+    offerHtml = `<div class="offer-line">Offer: <b class="num">${AM.money(l.offer.price)}</b> at <b class="num">${AM.money(l.offer.monthlyPayment)}</b>/mo${l.offer.notes ? " — \"" + AM.escapeHtml(l.offer.notes) + "\"" : ""}</div>`;
+    if (l.offer.buyerResponse === "pending" && l.status === "offer_sent") {
+      offerHtml += `<div class="offer-actions">
+        <button class="btn primary small" id="accept-${l.id}">Accept</button>
+        <button class="btn ghost small" id="decline-${l.id}">Decline</button>
+      </div>`;
+    }
+  }
+  return `<div class="req-row">
+    <div>
+      <div style="font-weight:600;font-size:14px;">${AM.escapeHtml(l.listingTitle)}</div>
+      <div style="font-size:12px;color:var(--ink-faint);">${AM.escapeHtml(l.providerName)} · match ${l.matchScore}</div>
+      ${offerHtml}
+    </div>
+    <span class="status-tag status-${l.status}">${l.status.replace("_"," ")}</span>
+  </div>`;
+}
+
+async function submitAffordability() {
+  const btn = document.getElementById("saveAfford");
+  btn.disabled = true;
+  try {
+    const body = {
+      mode: state.mode,
+      grossIncome: numVal("fIncome"),
+      monthlyDebts: numVal("fDebts"),
+      deposit: numVal("fDeposit"),
+      interestRate: parseFloat(val("fRate")),
+      termMonths: numVal("fTerm")
+    };
+    await AM.api("POST", "/api/buyer/affordability", body);
+    await loadAll();
+  } catch (e) {
+    document.getElementById("affordMsg").innerHTML = `<div class="error-box">${AM.escapeHtml(e.message)}</div>`;
+    btn.disabled = false;
+  }
+}
+function numVal(id) { return Number(String(val(id)).replace(/[^\d.]/g, "")) || 0; }
+
+async function requestOffer(listingId, btn) {
+  btn.disabled = true; btn.textContent = "Requesting…";
+  try {
+    await AM.api("POST", "/api/buyer/leads", { listingId });
+    await loadAll();
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false; btn.textContent = "Request offer";
+  }
+}
+
+async function respondOffer(offerId, response) {
+  try {
+    await AM.api("POST", `/api/buyer/offers/${offerId}/respond`, { response });
+    await loadAll();
+  } catch (e) { alert(e.message); }
+}
+
+boot();
+</script>
+</body>
+</html>

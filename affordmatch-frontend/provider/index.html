@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AffordMatch — Provider Portal</title>
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  .tabbar{display:flex;gap:6px;margin-bottom:24px;}
+  .tabbar button{border:1px solid var(--line-strong);background:var(--paper-raised);padding:9px 16px;font-size:13.5px;border-radius:6px;cursor:pointer;color:var(--ink-soft);}
+  .tabbar button.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  select.status-select{font-size:12.5px;padding:6px 8px;border-radius:6px;border:1px solid var(--line-strong);}
+  .overlay{position:fixed;inset:0;background:rgba(20,33,61,.45);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50;}
+  .modal{background:#fff;border-radius:10px;max-width:440px;width:100%;padding:26px;}
+  .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="wordmark">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none"><path d="M3 17 L9 9 L14 13 L23 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3 H23 V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="name">Afford<b>Match</b></div>
+      <div class="tag">Provider portal</div>
+    </div>
+    <div class="top-actions" id="topActions"></div>
+  </div>
+</header>
+
+<main><div class="shell" id="app"></div></main>
+<footer class="foot">AffordMatch — provider portal.</footer>
+
+<div id="modalRoot"></div>
+<script src="../shared/config.js"></script>
+<script src="../shared/api.js"></script>
+<script>
+const AM = window.AM;
+const app = document.getElementById("app");
+const topActions = document.getElementById("topActions");
+const modalRoot = document.getElementById("modalRoot");
+
+let state = { tab: "leads", leads: [], listings: [] };
+
+function renderTopActions() {
+  const loggedIn = !!AM.getToken();
+  topActions.innerHTML = loggedIn
+    ? `<span class="who" id="whoLabel"></span><button class="btn ghost small" id="logoutBtn">Log out</button>`
+    : "";
+  if (loggedIn) {
+    document.getElementById("logoutBtn").onclick = () => { AM.clearSession(); boot(); };
+    AM.api("GET", "/api/auth/me").then(d => { document.getElementById("whoLabel").textContent = d.user.email; }).catch(()=>{});
+  }
+}
+
+async function boot() {
+  renderTopActions();
+  if (!AM.getToken() || AM.getRole() !== "provider") { AM.clearSession(); renderAuth(); return; }
+  await loadAll();
+}
+
+function renderAuth() {
+  app.innerHTML = `
+    <div class="auth-shell card">
+      <h1>Provider log in</h1>
+      <div id="authError"></div>
+      <div class="field"><label>Email</label><input id="lEmail" type="email" value="johannesburg-toyota@affordmatch.dev"></div>
+      <div class="field"><label>Password</label><input id="lPass" type="password" value="Password123!"></div>
+      <button class="btn primary" id="lSubmit" style="width:100%">Log in</button>
+      <p style="font-size:12px;color:var(--ink-faint);margin-top:12px;">A seeded demo dealership is pre-filled — try also sandton-realty-group@affordmatch.dev for a property provider.</p>
+    </div>`;
+  document.getElementById("lSubmit").onclick = async () => {
+    try {
+      const d = await AM.api("POST", "/api/auth/login", { email: val("lEmail"), password: val("lPass") });
+      if (d.user.role !== "provider") throw new Error("That account is not a provider account.");
+      AM.setSession(d.token, d.user.role);
+      boot();
+    } catch (e) { document.getElementById("authError").innerHTML = `<div class="error-box">${AM.escapeHtml(e.message)}</div>`; }
+  };
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+
+async function loadAll() {
+  app.innerHTML = `<div class="empty">Loading your dashboard…</div>`;
+  try {
+    const [leadsRes, listingsRes] = await Promise.all([
+      AM.api("GET", "/api/provider/leads"),
+      AM.api("GET", "/api/provider/listings")
+    ]);
+    state.leads = leadsRes.leads;
+    state.listings = listingsRes.listings;
+    render();
+  } catch (e) {
+    app.innerHTML = `<div class="error-box">${AM.escapeHtml(e.message)}</div>`;
+  }
+}
+
+function render() {
+  let html = `<div class="tabbar">
+    <button id="tabLeads" class="${state.tab==="leads"?"active":""}">Qualified lead dashboard</button>
+    <button id="tabInventory" class="${state.tab==="inventory"?"active":""}">Inventory</button>
+  </div>`;
+  html += state.tab === "leads" ? renderLeadsTab() : renderInventoryTab();
+  app.innerHTML = html;
+
+  document.getElementById("tabLeads").onclick = () => { state.tab = "leads"; render(); };
+  document.getElementById("tabInventory").onclick = () => { state.tab = "inventory"; render(); };
+
+  if (state.tab === "leads") wireLeadsTab();
+  else wireInventoryTab();
+}
+
+// ---------------- leads tab ----------------
+function renderLeadsTab() {
+  const counts = { new: 0, contacted: 0, qualified: 0, offer_sent: 0, won: 0 };
+  state.leads.forEach(l => { if (counts[l.status] !== undefined) counts[l.status]++; });
+
+  let html = `<div class="stat-row">
+    ${["new","contacted","qualified","offer_sent","won"].map(s => `
+      <div class="stat"><div class="n num">${counts[s]}</div><div class="l">${s.replace("_"," ")}</div></div>
+    `).join("")}
+  </div>`;
+
+  if (!state.leads.length) {
+    html += `<div class="empty">No leads yet. Have a buyer request an offer on one of your listings.</div>`;
+    return html;
+  }
+
+  html += `<table><thead><tr>
+    <th>Buyer</th><th>Listing</th><th>Budget envelope</th><th>Match</th><th>Status</th><th>Action</th>
+  </tr></thead><tbody>`;
+  state.leads.forEach(l => {
+    const s = l.affordabilitySnapshot;
+    html += `<tr>
+      <td><div style="font-weight:600;">${AM.escapeHtml(l.buyerName)}</div><div style="font-size:12px;color:var(--ink-faint);">${AM.escapeHtml(l.buyerEmail)}</div></td>
+      <td>${AM.escapeHtml(l.listingTitle)}<div style="font-size:12px;color:var(--ink-faint);">${AM.money(l.listingPrice)}</div></td>
+      <td style="font-size:12px;color:var(--ink-faint);">${AM.money(s.minPrice)} – ${AM.money(s.maxPrice)}<div>Max ${AM.money(s.maxMonthlyPayment)}/mo</div></td>
+      <td><span class="pill ${l.matchScore>=70?"high":(l.matchScore>=40?"mid":"low")}">${l.matchScore}</span></td>
+      <td><select class="status-select" data-lead="${l.id}">
+        ${["new","contacted","qualified","offer_sent","won","lost"].map(s2 => `<option value="${s2}" ${s2===l.status?"selected":""}>${s2.replace("_"," ")}</option>`).join("")}
+      </select></td>
+      <td>${l.offer ? `<span style="font-size:12px;color:var(--ink-faint);">Offer sent</span>` : `<button class="btn ghost small" data-offer-lead="${l.id}">Submit offer</button>`}</td>
+    </tr>`;
+  });
+  html += `</tbody></table>`;
+  return html;
+}
+
+function wireLeadsTab() {
+  document.querySelectorAll("select[data-lead]").forEach(sel => {
+    sel.onchange = async () => {
+      try {
+        await AM.api("PATCH", `/api/provider/leads/${sel.getAttribute("data-lead")}/status`, { status: sel.value });
+        await loadAll();
+      } catch (e) { alert(e.message); }
+    };
+  });
+  document.querySelectorAll("button[data-offer-lead]").forEach(btn => {
+    btn.onclick = () => openOfferModal(btn.getAttribute("data-offer-lead"));
+  });
+}
+
+function openOfferModal(leadId) {
+  const lead = state.leads.find(l => l.id === leadId);
+  modalRoot.innerHTML = `<div class="overlay" id="ov"><div class="modal">
+    <h3>Submit an offer</h3>
+    <p style="font-size:13px;color:var(--ink-faint);margin-top:-8px;">To ${AM.escapeHtml(lead.buyerName)} for ${AM.escapeHtml(lead.listingTitle)}</p>
+    <div class="field"><label>Offer price (R)</label><input id="ofPrice" type="text" value="${lead.listingPrice}"></div>
+    <div class="field"><label>Monthly repayment (R)</label><input id="ofMonthly" type="text" value=""></div>
+    <div class="field"><label>Note (optional)</label><textarea id="ofNotes" rows="3" placeholder="Includes 2 year service plan"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="ofCancel">Cancel</button>
+      <button class="btn primary" id="ofSubmit">Send offer</button>
+    </div>
+  </div></div>`;
+  document.getElementById("ofCancel").onclick = closeModal;
+  document.getElementById("ov").onclick = (e) => { if (e.target.id === "ov") closeModal(); };
+  document.getElementById("ofSubmit").onclick = async () => {
+    try {
+      await AM.api("POST", `/api/provider/leads/${leadId}/offer`, {
+        price: Number(String(val("ofPrice")).replace(/[^\d.]/g,"")) || 0,
+        monthlyPayment: Number(String(val("ofMonthly")).replace(/[^\d.]/g,"")) || 0,
+        notes: val("ofNotes") || undefined
+      });
+      closeModal();
+      await loadAll();
+    } catch (e) { alert(e.message); }
+  };
+}
+function closeModal() { modalRoot.innerHTML = ""; }
+
+// ---------------- inventory tab ----------------
+function renderInventoryTab() {
+  let html = `<div class="section-head"><h2>Your inventory</h2>
+    <button class="btn primary small" id="newListingBtn">+ New listing</button></div>`;
+  if (!state.listings.length) {
+    html += `<div class="empty">No listings yet.</div>`;
+    return html;
+  }
+  html += `<table><thead><tr><th>Title</th><th>Category</th><th>Price</th><th>Status</th><th>Action</th></tr></thead><tbody>`;
+  state.listings.forEach(l => {
+    html += `<tr>
+      <td>${AM.escapeHtml(l.title)}<div style="font-size:12px;color:var(--ink-faint);">${AM.escapeHtml(l.location || "")}</div></td>
+      <td>${l.category}</td>
+      <td class="num">${AM.money(l.price)}</td>
+      <td><select class="status-select" data-listing="${l.id}">
+        ${["active","inactive","sold"].map(s => `<option value="${s}" ${s===l.status?"selected":""}>${s}</option>`).join("")}
+      </select></td>
+      <td style="font-size:12px;color:var(--ink-faint);">${new Date(l.createdAt).toLocaleDateString()}</td>
+    </tr>`;
+  });
+  html += `</tbody></table>`;
+  return html;
+}
+
+function wireInventoryTab() {
+  const newBtn = document.getElementById("newListingBtn");
+  if (newBtn) newBtn.onclick = openNewListingModal;
+  document.querySelectorAll("select[data-listing]").forEach(sel => {
+    sel.onchange = async () => {
+      try {
+        await AM.api("PATCH", `/api/provider/listings/${sel.getAttribute("data-listing")}`, { status: sel.value });
+        await loadAll();
+      } catch (e) { alert(e.message); }
+    };
+  });
+}
+
+function openNewListingModal() {
+  modalRoot.innerHTML = `<div class="overlay" id="ov"><div class="modal">
+    <h3>New listing</h3>
+    <div class="field"><label>Title</label><input id="nlTitle" type="text" placeholder="e.g. Toyota Corolla Cross 1.8 XS"></div>
+    <div class="field"><label>Location</label><input id="nlLoc" type="text" placeholder="e.g. Sandton"></div>
+    <div class="field"><label>Price (R)</label><input id="nlPrice" type="text" placeholder="389900"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="nlCancel">Cancel</button>
+      <button class="btn primary" id="nlSubmit">Create listing</button>
+    </div>
+  </div></div>`;
+  document.getElementById("nlCancel").onclick = closeModal;
+  document.getElementById("ov").onclick = (e) => { if (e.target.id === "ov") closeModal(); };
+  document.getElementById("nlSubmit").onclick = async () => {
+    try {
+      await AM.api("GET", "/api/auth/me").then(async (d) => {
+        // category is fixed per provider account in this MVP; infer from existing listings, default 'auto'
+        const category = state.listings[0] ? state.listings[0].category : "auto";
+        await AM.api("POST", "/api/provider/listings", {
+          category,
+          title: val("nlTitle"),
+          location: val("nlLoc") || undefined,
+          price: Number(String(val("nlPrice")).replace(/[^\d.]/g,"")) || 0
+        });
+      });
+      closeModal();
+      await loadAll();
+    } catch (e) { alert(e.message); }
+  };
+}
+
+boot();
+</script>
+</body>
+</html>

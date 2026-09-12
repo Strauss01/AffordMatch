@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AffordMatch — Admin Console</title>
+<link rel="stylesheet" href="../shared/styles.css">
+<style>
+  .tabbar{display:flex;gap:6px;margin-bottom:24px;}
+  .tabbar button{border:1px solid var(--line-strong);background:var(--paper-raised);padding:9px 16px;font-size:13.5px;border-radius:6px;cursor:pointer;color:var(--ink-soft);}
+  .tabbar button.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="wordmark">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none"><path d="M3 17 L9 9 L14 13 L23 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 3 H23 V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="name">Afford<b>Match</b></div>
+      <div class="tag">Admin console</div>
+    </div>
+    <div class="top-actions" id="topActions"></div>
+  </div>
+</header>
+
+<main><div class="shell" id="app"></div></main>
+<footer class="foot">AffordMatch — internal admin console.</footer>
+
+<script src="../shared/config.js"></script>
+<script src="../shared/api.js"></script>
+<script>
+const AM = window.AM;
+const app = document.getElementById("app");
+const topActions = document.getElementById("topActions");
+let state = { tab: "overview", overview: null, providers: [], buyers: [], leads: [] };
+
+function renderTopActions() {
+  const loggedIn = !!AM.getToken();
+  topActions.innerHTML = loggedIn
+    ? `<span class="who" id="whoLabel"></span><button class="btn ghost small" id="logoutBtn">Log out</button>`
+    : "";
+  if (loggedIn) {
+    document.getElementById("logoutBtn").onclick = () => { AM.clearSession(); boot(); };
+    AM.api("GET", "/api/auth/me").then(d => { document.getElementById("whoLabel").textContent = d.user.email; }).catch(()=>{});
+  }
+}
+
+async function boot() {
+  renderTopActions();
+  if (!AM.getToken() || AM.getRole() !== "admin") { AM.clearSession(); renderAuth(); return; }
+  await loadAll();
+}
+
+function renderAuth() {
+  app.innerHTML = `
+    <div class="auth-shell card">
+      <h1>Admin log in</h1>
+      <div id="authError"></div>
+      <div class="field"><label>Email</label><input id="lEmail" type="email" value="admin@affordmatch.dev"></div>
+      <div class="field"><label>Password</label><input id="lPass" type="password" value="Password123!"></div>
+      <button class="btn primary" id="lSubmit" style="width:100%">Log in</button>
+    </div>`;
+  document.getElementById("lSubmit").onclick = async () => {
+    try {
+      const d = await AM.api("POST", "/api/auth/login", { email: val("lEmail"), password: val("lPass") });
+      if (d.user.role !== "admin") throw new Error("That account is not an admin account.");
+      AM.setSession(d.token, d.user.role);
+      boot();
+    } catch (e) { document.getElementById("authError").innerHTML = `<div class="error-box">${AM.escapeHtml(e.message)}</div>`; }
+  };
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+
+async function loadAll() {
+  app.innerHTML = `<div class="empty">Loading platform data…</div>`;
+  try {
+    const [overview, providers, buyers, leads] = await Promise.all([
+      AM.api("GET", "/api/admin/overview"),
+      AM.api("GET", "/api/admin/providers"),
+      AM.api("GET", "/api/admin/buyers"),
+      AM.api("GET", "/api/admin/leads")
+    ]);
+    state.overview = overview;
+    state.providers = providers.providers;
+    state.buyers = buyers.buyers;
+    state.leads = leads.leads;
+    render();
+  } catch (e) {
+    app.innerHTML = `<div class="error-box">${AM.escapeHtml(e.message)}</div>`;
+  }
+}
+
+function render() {
+  let html = `<div class="tabbar">
+    ${["overview","providers","buyers","leads"].map(t => `<button data-tab="${t}" class="${state.tab===t?"active":""}">${t[0].toUpperCase()+t.slice(1)}</button>`).join("")}
+  </div>`;
+  if (state.tab === "overview") html += renderOverview();
+  if (state.tab === "providers") html += renderProviders();
+  if (state.tab === "buyers") html += renderBuyers();
+  if (state.tab === "leads") html += renderLeads();
+  app.innerHTML = html;
+  document.querySelectorAll("button[data-tab]").forEach(b => b.onclick = () => { state.tab = b.getAttribute("data-tab"); render(); });
+}
+
+function renderOverview() {
+  const o = state.overview;
+  const userCount = (role) => (o.usersByRole.find(r => r.role === role) || {}).count || 0;
+  const leadCount = (s) => (o.leadsByStatus.find(r => r.status === s) || {}).count || 0;
+  return `
+    <div class="stat-row">
+      <div class="stat"><div class="n num">${userCount("buyer")}</div><div class="l">buyers</div></div>
+      <div class="stat"><div class="n num">${userCount("provider")}</div><div class="l">providers</div></div>
+      <div class="stat"><div class="n num">${state.leads.length}</div><div class="l">total leads</div></div>
+      <div class="stat"><div class="n num">${leadCount("won")}</div><div class="l">won deals</div></div>
+      <div class="stat"><div class="n num">${AM.money(o.wonDeals.totalValue)}</div><div class="l">accepted offer value</div></div>
+    </div>
+    <div class="section-head"><h2>Listings by category</h2></div>
+    <table><thead><tr><th>Category</th><th>Status</th><th>Count</th></tr></thead><tbody>
+      ${o.listingsByCategoryStatus.map(r => `<tr><td>${r.category}</td><td>${r.status}</td><td class="num">${r.count}</td></tr>`).join("")}
+    </tbody></table>
+    <div class="section-head" style="margin-top:28px;"><h2>Leads by status</h2></div>
+    <table><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>
+      ${o.leadsByStatus.map(r => `<tr><td>${r.status.replace("_"," ")}</td><td class="num">${r.count}</td></tr>`).join("")}
+    </tbody></table>`;
+}
+
+function renderProviders() {
+  if (!state.providers.length) return `<div class="empty">No providers yet.</div>`;
+  return `<table><thead><tr><th>Company</th><th>Category</th><th>Plan</th><th>Subscription</th><th>Listings</th><th>Leads</th><th>Joined</th></tr></thead><tbody>
+    ${state.providers.map(p => `<tr>
+      <td>${AM.escapeHtml(p.company_name)}<div style="font-size:12px;color:var(--ink-faint);">${AM.escapeHtml(p.email)}</div></td>
+      <td>${p.category}</td>
+      <td>${p.plan || "—"}</td>
+      <td><span class="status-tag status-${p.subscription_status === "active" ? "won" : "lost"}">${p.subscription_status || "none"}</span></td>
+      <td class="num">${p.listing_count}</td>
+      <td class="num">${p.lead_count}</td>
+      <td style="font-size:12px;color:var(--ink-faint);">${new Date(p.created_at).toLocaleDateString()}</td>
+    </tr>`).join("")}
+  </tbody></table>`;
+}
+
+function renderBuyers() {
+  if (!state.buyers.length) return `<div class="empty">No buyers yet.</div>`;
+  return `<table><thead><tr><th>Name</th><th>Email</th><th>Leads</th><th>Joined</th></tr></thead><tbody>
+    ${state.buyers.map(b => `<tr>
+      <td>${AM.escapeHtml(b.full_name)}</td>
+      <td>${AM.escapeHtml(b.email)}</td>
+      <td class="num">${b.lead_count}</td>
+      <td style="font-size:12px;color:var(--ink-faint);">${new Date(b.created_at).toLocaleDateString()}</td>
+    </tr>`).join("")}
+  </tbody></table>`;
+}
+
+function renderLeads() {
+  if (!state.leads.length) return `<div class="empty">No leads yet.</div>`;
+  return `<table><thead><tr><th>Buyer</th><th>Provider</th><th>Listing</th><th>Match</th><th>Status</th><th>Created</th></tr></thead><tbody>
+    ${state.leads.map(l => `<tr>
+      <td>${AM.escapeHtml(l.buyer_name)}</td>
+      <td>${AM.escapeHtml(l.provider_name)}</td>
+      <td>${AM.escapeHtml(l.listing_title)}<div style="font-size:12px;color:var(--ink-faint);">${l.category}</div></td>
+      <td><span class="pill ${l.match_score>=70?"high":(l.match_score>=40?"mid":"low")}">${l.match_score}</span></td>
+      <td><span class="status-tag status-${l.status}">${l.status.replace("_"," ")}</span></td>
+      <td style="font-size:12px;color:var(--ink-faint);">${new Date(l.created_at).toLocaleDateString()}</td>
+    </tr>`).join("")}
+  </tbody></table>`;
+}
+
+boot();
+</script>
+</body>
+</html>
