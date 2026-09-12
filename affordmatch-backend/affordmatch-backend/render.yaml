@@ -1,0 +1,27 @@
+# Render Blueprint for the AffordMatch API only.
+# The database lives on Supabase, not Render, so there's no `databases:`
+# block here — DATABASE_URL is a secret you paste in once (sync: false
+# means Render prompts for it during setup and won't try to manage it).
+#
+# Deploy: push this repo, then in Render: New + -> Blueprint -> connect it.
+
+services:
+  - type: web
+    name: affordmatch-api
+    runtime: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    preDeployCommand: node src/utils/migrate.js && node src/utils/seed.js
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # paste your Supabase session-pooler connection string here
+      - key: DB_SSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 12h
+      - key: PORT
+        value: 4000
